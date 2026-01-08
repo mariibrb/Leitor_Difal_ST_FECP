@@ -1,53 +1,56 @@
 import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
+import io
 
-def get_text(element, ns):
-    """Função auxiliar para evitar erro de 'NoneType'"""
-    if element is not None:
-        return element.text
-    return "0.00"
+def safe_float(value):
+    """Converte texto para número de forma segura."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 def parse_nfe(xml_file):
     try:
-        # Lê o conteúdo do arquivo
-        content = xml_file.read()
-        root = ET.fromstring(content)
+        # Lê o conteúdo e remove possíveis espaços em branco extras
+        xml_data = xml_file.read()
+        # O strip() ajuda a evitar erros de parsing no início do arquivo
+        root = ET.fromstring(xml_data.strip())
         
-        # Define o namespace padrão da NF-e
-        ns = {'ns': 'http://www.portalfiscal.inf.br/nfe'}
+        # Remove namespaces para busca universal (isso resolve 99% dos erros de NoneType)
+        for el in root.iter():
+            if '}' in el.tag:
+                el.tag = el.tag.split('}', 1)[1]
         
         data = []
         
-        # Localiza Identificação e Destinatário com tratamento de erro
-        ide = root.find('.//ns:ide', ns)
-        dest = root.find('.//ns:dest', ns)
+        # Identificação Básica
+        ide = root.find('.//ide')
+        nNF = ide.find('nNF').text if ide is not None and ide.find('nNF') is not None else "S/N"
         
-        nNF = ide.find('ns:nNF', ns).text if ide is not None and ide.find('ns:nNF', ns) is not None else "S/N"
-        
-        # Dados do Destinatário
+        # Dados do Destinatário (UF e IE)
+        dest = root.find('.//dest')
         uf_dest = "N/A"
-        ie_dest = "N/A"
+        ie_dest = "ISENTO"
         
         if dest is not None:
-            uf_el = dest.find('ns:UF', ns)
+            uf_el = dest.find('UF')
             uf_dest = uf_el.text if uf_el is not None else "N/A"
             
-            isuf = dest.find('ns:ISUF', ns)
-            ie = dest.find('ns:IE', ns)
-            if isuf is not None:
+            # Busca IE ou Inscrição de Substituto
+            ie = dest.find('IE')
+            isuf = dest.find('ISUF')
+            if isuf is not None and isuf.text:
                 ie_dest = isuf.text
-            elif ie is not None:
+            elif ie is not None and ie.text:
                 ie_dest = ie.text
-            else:
-                ie_dest = "ISENTO"
 
-        # Varredura de itens
-        for det in root.findall('.//ns:det', ns):
-            prod = det.find('ns:prod', ns)
-            xProd = prod.find('ns:xProd', ns).text if prod is not None else "Produto s/ nome"
+        # Varredura de Itens (det)
+        for det in root.findall('.//det'):
+            prod = det.find('prod')
+            xProd = prod.find('xProd').text if prod is not None and prod.find('xProd') is not None else "Produto não identificado"
             
-            imposto = det.find('ns:imposto', ns)
+            imposto = det.find('imposto')
             
             row = {
                 "NFe": nNF,
@@ -63,59 +66,86 @@ def parse_nfe(xml_file):
             }
             
             if imposto is not None:
-                # Procura valores de ST e FCP ST
-                for st_tag in ['.//ns:vBCST', './/ns:vICMSST', './/ns:vFCPST']:
-                    el = imposto.find(st_tag, ns)
-                    if el is not None:
-                        field_name = st_tag.split(':')[-1]
-                        row[field_name] = float(el.text) if el.text else 0.0
+                # Busca valores de ST e FCP ST em qualquer lugar dentro de 'imposto'
+                vBCST = imposto.find('.//vBCST')
+                vICMSST = imposto.find('.//vICMSST')
+                vFCPST = imposto.find('.//vFCPST')
                 
-                # Procura valores de DIFAL (ICMSUFDest)
-                difal = imposto.find('.//ns:ICMSUFDest', ns)
+                if vBCST is not None: row["vBCST"] = safe_float(vBCST.text)
+                if vICMSST is not None: row["vICMSST"] = safe_float(vICMSST.text)
+                if vFCPST is not None: row["vFCPST"] = safe_float(vFCPST.text)
+                
+                # Busca valores de DIFAL (ICMSUFDest)
+                difal = imposto.find('.//ICMSUFDest')
                 if difal is not None:
-                    vBCUFDest = difal.find('ns:vBCUFDest', ns)
-                    vICMSUFDest = difal.find('ns:vICMSUFDest', ns)
-                    vFCPUFDest = difal.find('ns:vFCPUFDest', ns)
+                    vBCUFDest = difal.find('vBCUFDest')
+                    vICMSUFDest = difal.find('vICMSUFDest')
+                    vFCPUFDest = difal.find('vFCPUFDest')
                     
-                    row["vBCUFDest"] = float(vBCUFDest.text) if vBCUFDest is not None else 0.0
-                    row["vICMSUFDest"] = float(vICMSUFDest.text) if vICMSUFDest is not None else 0.0
-                    row["vFCPUFDest"] = float(vFCPUFDest.text) if vFCPUFDest is not None else 0.0
+                    if vBCUFDest is not None: row["vBCUFDest"] = safe_float(vBCUFDest.text)
+                    if vICMSUFDest is not None: row["vICMSUFDest"] = safe_float(vICMSUFDest.text)
+                    if vFCPUFDest is not None: row["vFCPUFDest"] = safe_float(vFCPUFDest.text)
             
             data.append(row)
         return pd.DataFrame(data)
     except Exception as e:
-        st.error(f"Erro ao processar o arquivo: {e}")
+        st.error(f"Erro crítico no arquivo {xml_file.name}: {e}")
         return pd.DataFrame()
 
-# Interface do App
-st.set_page_config(page_title="Leitor Fiscal", layout="wide")
+# --- INTERFACE STREAMLIT ---
+st.set_page_config(page_title="Leitor Fiscal Master", layout="wide")
+
 st.title("📑 Leitor Fiscal: DIFAL, ST e FECP")
+st.markdown("Esta versão ignora erros de estrutura e foca na captura dos valores de impostos.")
 
-files = st.file_uploader("Suba seus XMLs aqui", type="xml", accept_multiple_files=True)
+uploaded_files = st.file_uploader("Arraste seus XMLs aqui", type="xml", accept_multiple_files=True)
 
-if files:
+if uploaded_files:
     all_dfs = []
-    for f in files:
-        df = parse_nfe(f)
-        if not df.empty:
-            all_dfs.append(df)
+    
+    for f in uploaded_files:
+        # Reset do ponteiro do arquivo para garantir leitura correta
+        f.seek(0)
+        df_nota = parse_nfe(f)
+        if not df_nota.empty:
+            all_dfs.append(df_nota)
     
     if all_dfs:
         df_final = pd.concat(all_dfs, ignore_index=True)
+        
+        # Cálculo do FECP Total (ST + DIFAL)
         df_final["Total_FECP"] = df_final["vFCPST"] + df_final["vFCPUFDest"]
 
-        st.subheader("📊 Resumo Consolidado por UF")
+        # --- EXIBIÇÃO DO RESUMO ---
+        st.subheader("📊 Resumo Consolidado por Estado e IE")
+        
         resumo = df_final.groupby(['UF_Destino', 'IE_Substituto']).agg({
             'vICMSST': 'sum',
             'vICMSUFDest': 'sum',
             'Total_FECP': 'sum'
         }).reset_index()
         
-        resumo.columns = ['Estado', 'IE Substituto', 'Total ST', 'Total DIFAL', 'Total FECP']
-        st.table(resumo.style.format({'Total ST': 'R$ {:.2f}', 'Total DIFAL': 'R$ {:.2f}', 'Total FECP': 'R$ {:.2f}'}))
+        # Formatação para visualização
+        resumo_formatado = resumo.copy()
+        resumo_formatado.columns = ['Estado', 'IE Substituto', 'Total ST', 'Total DIFAL', 'Total FECP']
+        
+        st.table(resumo_formatado.style.format({
+            'Total ST': 'R$ {:.2f}', 
+            'Total DIFAL': 'R$ {:.2f}', 
+            'Total FECP': 'R$ {:.2f}'
+        }))
 
-        st.subheader("🔍 Dados Detalhados")
-        st.dataframe(df_final)
+        # --- EXIBIÇÃO DETALHADA ---
+        with st.expander("Clique aqui para ver os dados detalhados por item"):
+            st.dataframe(df_final)
 
+        # Botão de Download
         csv = df_final.to_csv(index=False).encode('utf-8')
-        st.download_button("Baixar Planilha Excel (CSV)", csv, "apuracao.csv", "text/csv")
+        st.download_button(
+            label="📥 Baixar Relatório Completo para Excel",
+            data=csv,
+            file_name="apuracao_impostos.csv",
+            mime="text/csv"
+        )
+    else:
+        st.warning("Nenhum dado válido foi extraído dos arquivos enviados.")
