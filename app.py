@@ -5,7 +5,9 @@ from io import BytesIO
 
 def safe_float(value):
     try:
-        return float(value.replace(',', '.')) if value else 0.0
+        if isinstance(value, str):
+            return float(value.replace(',', '.'))
+        return float(value) if value is not None else 0.0
     except (TypeError, ValueError):
         return 0.0
 
@@ -40,13 +42,11 @@ def parse_nfe(xml_file):
             }
             
             if imposto is not None:
-                # ICMS ST e FCP ST
                 vST = imposto.find('.//vICMSST')
                 vFST = imposto.find('.//vFCPST')
                 if vST is not None: row["ST"] = safe_float(vST.text)
                 if vFST is not None: row["FCP_ST"] = safe_float(vFST.text)
                 
-                # DIFAL e FCP (ICMSUFDest)
                 difal = imposto.find('.//ICMSUFDest')
                 if difal is not None:
                     vD = difal.find('vICMSUFDest')
@@ -61,8 +61,8 @@ def parse_nfe(xml_file):
         return pd.DataFrame()
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Leitor Fiscal Estilo Relatório", layout="wide")
-st.title("📑 Gerador de Relatório ST, DIFAL e FCP")
+st.set_page_config(page_title="Leitor Fiscal", layout="wide")
+st.title("📑 Relatório ST, DIFAL e FCP")
 
 files = st.file_uploader("Arraste seus XMLs", type="xml", accept_multiple_files=True)
 
@@ -76,36 +76,47 @@ if files:
     if all_dfs:
         df_final = pd.concat(all_dfs, ignore_index=True)
         
-        # Agrupamento por Estado para o Resumo
+        # Agrupamento por Estado
         resumo = df_final.groupby('Estado').agg({
             'ST': 'sum', 'DIFAL': 'sum', 'FCP': 'sum', 'FCP_ST': 'sum'
         }).reset_index()
 
-        # Criar a estrutura visual de duas colunas (conforme imagem)
+        # Lista completa de estados para o layout
         lista_estados = ["AC","AL","AM","AP","BA","CE","DF","ES","GO","MA","MG","MS","MT","PA",
                          "PB","PE","PI","PR","RJ","RN","RO","RR","RS","SC","SE","SP","TO"]
         
-        # Preenche estados faltantes com zero para manter o layout da imagem
         resumo_full = pd.DataFrame(lista_estados, columns=['Estado'])
         resumo_full = resumo_full.merge(resumo, on='Estado', how='left').fillna(0)
 
-        # Divide em duas tabelas para ficarem lado a lado (14 estados na primeira, 13 na segunda)
+        # Divisão para o layout lado a lado
         parte1 = resumo_full.iloc[:14].reset_index(drop=True)
         parte2 = resumo_full.iloc[14:].reset_index(drop=True)
-        resumo_lado_a_lado = pd.concat([parte1, parte2], axis=1)
+        
+        # Renomeia colunas da parte 2 para evitar o erro de duplicidade
+        parte2.columns = [f"{col} " for col in parte2.columns]
+        
+        resumo_visual = pd.concat([parte1, parte2], axis=1)
 
-        st.subheader("📊 Prévia do Relatório por Estado")
-        st.dataframe(resumo_lado_a_lado.style.format(precision=2))
+        st.subheader("📊 Resumo por Estado")
+        st.dataframe(resumo_visual.style.format(precision=2))
 
-        # Exportação para Excel
+        # Totais Gerais
+        st.subheader("💰 Totais Consolidados")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total ST", f"R$ {df_final['ST'].sum():,.2f}")
+        c2.metric("Total DIFAL", f"R$ {df_final['DIFAL'].sum():,.2f}")
+        c3.metric("Total FCP", f"R$ {df_final['FCP'].sum():,.2f}")
+        c4.metric("Total FCP-ST", f"R$ {df_final['FCP_ST'].sum():,.2f}")
+
+        # Excel
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            resumo_lado_a_lado.to_excel(writer, index=False, sheet_name='Resumo_Estilo_Imagem')
+            resumo_visual.to_excel(writer, index=False, sheet_name='Resumo_Estados')
             df_final.to_excel(writer, index=False, sheet_name='Dados_Detalhados')
         
         st.download_button(
-            label="📥 Baixar Relatório Igual à Imagem (.xlsx)",
+            label="📥 Baixar Planilha Excel (.xlsx)",
             data=output.getvalue(),
-            file_name="relatorio_fiscal_formatado.xlsx",
+            file_name="relatorio_fiscal.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
