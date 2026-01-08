@@ -21,9 +21,9 @@ def parse_nfe(xml_file):
         ide = root.find('.//ide')
         nNF = ide.find('nNF').text if ide is not None and ide.find('nNF') is not None else "S/N"
         
+        dest = root.find('.//dest')
         uf_dest = "N/A"
         ie_dest = "ISENTO"
-        dest = root.find('.//dest')
         if dest is not None:
             uf_el = dest.find('.//UF')
             if uf_el is not None: uf_dest = uf_el.text
@@ -33,33 +33,26 @@ def parse_nfe(xml_file):
             elif ie is not None and ie.text: ie_dest = ie.text
 
         for det in root.findall('.//det'):
-            prod = det.find('prod')
-            xProd = prod.find('xProd').text if prod is not None and prod.find('xProd') is not None else "S/Nome"
             imposto = det.find('imposto')
-            
             row = {
-                "NFe": nNF,
-                "UF_Destino": uf_dest,
-                "IE_Substituto": ie_dest,
-                "Produto": xProd,
-                "vICMSST": 0.0,
-                "vICMSUFDest": 0.0,
-                "vFCPST": 0.0,
-                "vFCPUFDest": 0.0
+                "NFe": nNF, "Estado": uf_dest, "IE": ie_dest,
+                "ST": 0.0, "DIFAL": 0.0, "FCP": 0.0, "FCP_ST": 0.0
             }
             
             if imposto is not None:
-                vICMSST = imposto.find('.//vICMSST')
-                vFCPST = imposto.find('.//vFCPST')
-                if vICMSST is not None: row["vICMSST"] = safe_float(vICMSST.text)
-                if vFCPST is not None: row["vFCPST"] = safe_float(vFCPST.text)
+                # ICMS ST e FCP ST
+                vST = imposto.find('.//vICMSST')
+                vFST = imposto.find('.//vFCPST')
+                if vST is not None: row["ST"] = safe_float(vST.text)
+                if vFST is not None: row["FCP_ST"] = safe_float(vFST.text)
                 
+                # DIFAL e FCP (ICMSUFDest)
                 difal = imposto.find('.//ICMSUFDest')
                 if difal is not None:
-                    vI = difal.find('vICMSUFDest')
+                    vD = difal.find('vICMSUFDest')
                     vF = difal.find('vFCPUFDest')
-                    if vI is not None: row["vICMSUFDest"] = safe_float(vI.text)
-                    if vF is not None: row["vFCPUFDest"] = safe_float(vF.text)
+                    if vD is not None: row["DIFAL"] = safe_float(vD.text)
+                    if vF is not None: row["FCP"] = safe_float(vF.text)
             
             data.append(row)
         return pd.DataFrame(data)
@@ -68,45 +61,51 @@ def parse_nfe(xml_file):
         return pd.DataFrame()
 
 # --- INTERFACE ---
-st.set_page_config(page_title="Leitor Fiscal Excel", layout="wide")
-st.title("📑 Apuração Fiscal com Abas Excel")
+st.set_page_config(page_title="Leitor Fiscal Estilo Relatório", layout="wide")
+st.title("📑 Gerador de Relatório ST, DIFAL e FCP")
 
-uploaded_files = st.file_uploader("Suba seus XMLs", type="xml", accept_multiple_files=True)
+files = st.file_uploader("Arraste seus XMLs", type="xml", accept_multiple_files=True)
 
-if uploaded_files:
+if files:
     all_dfs = []
-    for f in uploaded_files:
+    for f in files:
         f.seek(0)
         df_nota = parse_nfe(f)
         if not df_nota.empty: all_dfs.append(df_nota)
     
     if all_dfs:
         df_final = pd.concat(all_dfs, ignore_index=True)
-        df_final["Total_FECP"] = df_final["vFCPST"] + df_final["vFCPUFDest"]
-
-        # 1. Gerar Resumo Agrupado
-        resumo_uf = df_final.groupby(['UF_Destino', 'IE_Substituto']).agg({
-            'vICMSST': 'sum',
-            'vICMSUFDest': 'sum',
-            'Total_FECP': 'sum'
+        
+        # Agrupamento por Estado para o Resumo
+        resumo = df_final.groupby('Estado').agg({
+            'ST': 'sum', 'DIFAL': 'sum', 'FCP': 'sum', 'FCP_ST': 'sum'
         }).reset_index()
-        resumo_uf.columns = ['Estado', 'IE Substituto', 'Soma ICMS ST', 'Soma DIFAL', 'Soma FECP']
 
-        # Exibir na tela
-        st.subheader("📊 Resumo por Estado")
-        st.table(resumo_uf.style.format({'Soma ICMS ST': 'R$ {:.2f}', 'Soma DIFAL': 'R$ {:.2f}', 'Soma FECP': 'R$ {:.2f}'}))
+        # Criar a estrutura visual de duas colunas (conforme imagem)
+        lista_estados = ["AC","AL","AM","AP","BA","CE","DF","ES","GO","MA","MG","MS","MT","PA",
+                         "PB","PE","PI","PR","RJ","RN","RO","RR","RS","SC","SE","SP","TO"]
+        
+        # Preenche estados faltantes com zero para manter o layout da imagem
+        resumo_full = pd.DataFrame(lista_estados, columns=['Estado'])
+        resumo_full = resumo_full.merge(resumo, on='Estado', how='left').fillna(0)
 
-        # 2. Criar Arquivo Excel com múltiplas abas em memória
+        # Divide em duas tabelas para ficarem lado a lado (14 estados na primeira, 13 na segunda)
+        parte1 = resumo_full.iloc[:14].reset_index(drop=True)
+        parte2 = resumo_full.iloc[14:].reset_index(drop=True)
+        resumo_lado_a_lado = pd.concat([parte1, parte2], axis=1)
+
+        st.subheader("📊 Prévia do Relatório por Estado")
+        st.dataframe(resumo_lado_a_lado.style.format(precision=2))
+
+        # Exportação para Excel
         output = BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            resumo_uf.to_excel(writer, index=False, sheet_name='Resumo_Por_Estado')
-            df_final.to_excel(writer, index=False, sheet_name='Detalhado_Geral')
+            resumo_lado_a_lado.to_excel(writer, index=False, sheet_name='Resumo_Estilo_Imagem')
+            df_final.to_excel(writer, index=False, sheet_name='Dados_Detalhados')
         
-        processed_data = output.getvalue()
-
         st.download_button(
-            label="📥 Baixar Planilha Excel com Abas",
-            data=processed_data,
-            file_name="apuracao_completa.xlsx",
+            label="📥 Baixar Relatório Igual à Imagem (.xlsx)",
+            data=output.getvalue(),
+            file_name="relatorio_fiscal_formatado.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
